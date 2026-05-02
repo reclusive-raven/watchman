@@ -1,0 +1,11 @@
+# Grant group-read access to Intel/AMD RAPL energy counters so the
+# watchman-agent user service can compute CPU package power draw.
+#
+# Default perms on modern kernels are 0400 root:root (CVE-2020-8694), which
+# keeps the agent from reading energy_uj. This widens to group=power, read-only.
+# The `power` group already contains the agent's user on these workers; using
+# it is both semantically correct (RAPL is a power interface) and safer than
+# granting world-read.
+ACTION=="add|change", SUBSYSTEM=="powercap", KERNEL=="intel-rapl:*", \
+    RUN+="/bin/chgrp -R power /sys/%p", \
+    RUN+="/bin/chmod -R g+r /sys/%p"

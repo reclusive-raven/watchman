@@ -1,0 +1,13 @@
+[Unit]
+Description=Watchman Agent - System metrics HTTP server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/watchman-agent
+Restart=always
+RestartSec=5
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=default.target

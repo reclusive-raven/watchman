@@ -1,0 +1,30 @@
+name: Watchman
+options:
+  bundleIdPrefix: com.watchman
+  deploymentTarget:
+    macOS: "14.0"
+  xcodeVersion: "16.0"
+targets:
+  Watchman:
+    type: application
+    platform: macOS
+    sources:
+      - path: Watchman
+        excludes:
+          - Package.swift
+    info:
+      path: Watchman/Info.plist
+      properties:
+        LSUIElement: true
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        NSBonjourServices:
+          - _watchman._tcp
+        NSLocalNetworkUsageDescription: "Watchman discovers and polls GPU worker agents on the local network."
+    settings:
+      base:
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_REQUIRED: NO
+        PRODUCT_BUNDLE_IDENTIFIER: com.watchman.app
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        SWIFT_VERSION: "5.9"
