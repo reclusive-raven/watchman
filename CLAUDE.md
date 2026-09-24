@@ -88,3 +88,12 @@ Table `metric_samples` (schema v4), composite PK `(hostname, timestamp)`, plus i
 - Bonjour is best-effort; if mDNS is blocked, the agent still serves HTTP and workers can be added by hand.
 - RAPL reads return `None` until `99-rapl.rules` has been installed *and* the service has been restarted so the new group perms take effect.
 - On the Mac side, don't forget to keep the SQLite file path (`power.sqlite`) stable — it's the on-disk identity relied on by existing installs even though the type was renamed `Metric*`.
+
+## Git workflow
+
+Strict for every repo in the `reclusive-raven` org. The canonical text is in the meta-folder's `CLAUDE.md`, one level up in a local checkout.
+
+- **`main` stays linear.** Commit straight to it, or land a branch by rebasing it onto `main` and running `git merge --ff-only`. On GitHub, **Rebase and merge** is the only button.
+- **Titles start with a lower-case letter**, imperative, one short line, with no `feat:`-style prefix. A body is optional: a blank line, then a few plain sentences wrapped at 72 columns.
+- **Clean up after every merge**: remove the worktree, delete the branch locally and on GitHub, and drop any stash.
+- **Never force-push, rewrite or delete `main`.** A GitHub ruleset enforces it here.
