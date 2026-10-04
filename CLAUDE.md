@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What Is Watchman
 
 A two-part system for monitoring GPU worker machines from a macOS menu bar:
-- **Agent** (`agent/`) — Rust HTTP server on each Linux GPU worker, exposing system metrics (CPU, NVML GPU, RAM, disk, temps, CPU/GPU power, disk+network I/O) on port 8085. Stateless; advertises itself over mDNS as `_watchman._tcp.local.`.
+- **Agent** (`agent/`) — Rust HTTP server on each Linux or Windows GPU worker, exposing system metrics (CPU, NVML GPU, RAM, disk, temps, CPU/GPU power, disk+network I/O) on port 8085. Stateless; advertises itself over mDNS as `_watchman._tcp.local.`.
 - **App** (`app/`) — SwiftUI macOS menu bar app that polls agents every second, renders live status with colored indicators, persists samples to SQLite, fires macOS notifications on threshold breaches, and exports CSV on demand.
 
 ## Build & Deploy Commands
@@ -22,6 +22,8 @@ make deploy        # Build + deploy to all workers via SSH
 ```
 
 Requires `cargo-zigbuild`. Worker SSH hosts are passed via the `WATCHMAN_WORKERS` env var to `deploy/deploy.sh` (e.g. `WATCHMAN_WORKERS="worker-1.lan worker-2.lan" make deploy`). The agent runs as a systemd **user** service (`~/.config/systemd/user/watchman-agent.service`).
+
+Windows workers: `make build-agent-windows` (target `x86_64-pc-windows-gnu`, needs `rustup target add x86_64-pc-windows-gnu`) and `WATCHMAN_WINDOWS_WORKERS="host=reported-name" make deploy-windows`. `deploy/install-windows.ps1` runs on the worker over SSH (admin account required) and registers a `watchman-agent` scheduled task as SYSTEM: an at-boot trigger plus a clock trigger repeating every minute with `IgnoreNew`, which restarts a crashed agent (a repeat on the boot trigger itself only starts counting at the next boot), and a zero execution time limit to avoid Task Scheduler's 72-hour kill. `--hostname <name>` overrides the reported hostname, since Windows computer names cap at 15 characters. RAPL and CPU temperature are unavailable there, so `cpu_w`/`cpu_temp_c` are `null`.
 
 ### App (Swift/SwiftUI)
 
@@ -87,6 +89,7 @@ Table `metric_samples` (schema v4), composite PK `(hostname, timestamp)`, plus i
 - Sparkline history is in-memory only; full history lives in SQLite.
 - Bonjour is best-effort; if mDNS is blocked, the agent still serves HTTP and workers can be added by hand.
 - RAPL reads return `None` until `99-rapl.rules` has been installed *and* the service has been restarted so the new group perms take effect.
+- On Windows, probe the agent at `127.0.0.1`, not `localhost`: `localhost` resolves to `::1` first, the agent binds IPv4 only, and Windows retries the refused connection for about 2 s before falling back.
 - On the Mac side, don't forget to keep the SQLite file path (`power.sqlite`) stable — it's the on-disk identity relied on by existing installs even though the type was renamed `Metric*`.
 
 ## Git workflow

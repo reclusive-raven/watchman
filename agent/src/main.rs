@@ -83,7 +83,19 @@ struct AppState {
     metrics: RwLock<Metrics>,
 }
 
+/// The name this agent reports: `--hostname <name>` if given, else the OS
+/// hostname. The app keys history by this name, so a host whose OS name
+/// can't match its fleet name (Windows caps computer names at 15
+/// characters) passes the flag to keep one continuous series.
 fn get_hostname() -> String {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--hostname" {
+            if let Some(name) = args.next().filter(|n| !n.is_empty()) {
+                return name;
+            }
+        }
+    }
     hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_else(|_| "unknown".to_string())
@@ -249,16 +261,13 @@ fn spawn_mdns_announce(hostname: &str, port: u16) -> Option<ServiceDaemon> {
     Some(daemon)
 }
 
-fn read_cpu_model() -> Option<String> {
-    let raw = std::fs::read_to_string("/proc/cpuinfo").ok()?;
-    for line in raw.lines() {
-        if let Some(rest) = line.strip_prefix("model name") {
-            if let Some(colon) = rest.find(':') {
-                return Some(rest[colon + 1..].trim().to_string());
-            }
-        }
-    }
-    None
+/// CPU brand string via sysinfo, so it works on Windows as well as Linux,
+/// where it comes from the same `/proc/cpuinfo` "model name" line.
+fn read_cpu_model(sys: &System) -> Option<String> {
+    sys.cpus()
+        .first()
+        .map(|c| c.brand().trim().to_string())
+        .filter(|b| !b.is_empty())
 }
 
 async fn metrics_handler(State(state): State<Arc<AppState>>) -> Json<Metrics> {
@@ -328,7 +337,7 @@ async fn main() {
         if !rapl.available() {
             info!("RAPL not available — cpu_w will be null");
         }
-        let cpu_model = read_cpu_model();
+        let cpu_model = read_cpu_model(&sys);
         let mut disk_space_tick: u32 = 0;
         let mut disk_space = collect_disk_metrics(&disks);
         let mut last_io_instant = std::time::Instant::now();

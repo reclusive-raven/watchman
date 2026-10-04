@@ -1,6 +1,6 @@
 # Watchman
 
-A macOS menu-bar monitor for a fleet of Linux GPU workers. Tiny Rust agent on each box, SwiftUI menu-bar client on the Mac. Shows live CPU, GPU, RAM, disk, temps, power draw, and I/O at a glance, fires native macOS alerts on threshold breaches, and keeps 90 days of history in SQLite for export.
+A macOS menu-bar monitor for a fleet of Linux and Windows GPU workers. Tiny Rust agent on each box, SwiftUI menu-bar client on the Mac. Shows live CPU, GPU, RAM, disk, temps, power draw, and I/O at a glance, fires native macOS alerts on threshold breaches, and keeps 90 days of history in SQLite for export.
 
 Built for personal homelab and small-lab fleets where running Grafana feels like overkill.
 
@@ -8,7 +8,7 @@ Built for personal homelab and small-lab fleets where running Grafana feels like
 
 Two parts:
 
-- **Agent** ([`agent/`](agent/)) — Stateless Rust HTTP server. Runs on each Linux GPU worker, exposes JSON metrics on `:8085`, advertises itself over mDNS as `_watchman._tcp.local.`. Reads CPU/RAM/disk/network from `sysinfo`, GPU + GPU power from NVML, and CPU power from RAPL (`/sys/class/powercap/intel-rapl:*/energy_uj`).
+- **Agent** ([`agent/`](agent/)) — Stateless Rust HTTP server. Runs on each Linux or Windows GPU worker, exposes JSON metrics on `:8085`, advertises itself over mDNS as `_watchman._tcp.local.`. Reads CPU/RAM/disk/network from `sysinfo`, GPU + GPU power from NVML, and CPU power from RAPL (`/sys/class/powercap/intel-rapl:*/energy_uj`).
 - **App** ([`app/`](app/)) — SwiftUI macOS menu-bar app. Polls all enabled agents at 1 Hz over HTTP, renders live status with color-coded indicators, persists samples to SQLite (`~/Library/Application Support/Watchman/power.sqlite`), fires `UNUserNotification`s on edge-detected threshold breaches, and exports CSV on demand. Also runs a Bonjour browser to auto-discover agents on the LAN.
 
 Endpoints on the agent: `GET /metrics` (JSON), `GET /health` (liveness).
@@ -35,6 +35,22 @@ WATCHMAN_WORKERS="worker-1.lan worker-2.lan" ./deploy/deploy.sh --install-rapl
 ```
 
 The deploy script `scp`s the binary and a systemd **user** unit (`deploy/watchman-agent.service`) to each worker, then `systemctl --user enable --now watchman-agent`. To survive logout, run `sudo loginctl enable-linger $USER` once on each worker.
+
+### Agent (Windows GPU workers)
+
+Same cross-compile, different target. Needs OpenSSH Server on the worker and an SSH account in its Administrators group:
+
+```bash
+rustup target add x86_64-pc-windows-gnu
+
+make build-agent-windows    # → target/x86_64-pc-windows-gnu/release/watchman-agent.exe
+
+# Deploy via SSH. Append =<name> to report a name other than the Windows
+# computer name, which is capped at 15 characters.
+WATCHMAN_WINDOWS_WORKERS="worker-3.lan=gpu-box-3" make deploy-windows
+```
+
+`deploy/install-windows.ps1` puts the binary in `C:\Program Files\watchman`, registers a `watchman-agent` scheduled task that runs as SYSTEM at boot and restarts a crashed agent within a minute, and allows TCP 8085 and mDNS through the firewall on Private networks. Windows has no unprivileged CPU power counter and rarely exposes CPU temperature, so `cpu_w` and `cpu_temp_c` are `null`; GPU metrics, GPU power and everything else work as on Linux.
 
 ### App (macOS)
 
