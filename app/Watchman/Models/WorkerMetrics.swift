@@ -12,6 +12,7 @@ struct WorkerMetrics: Codable, Identifiable {
     let temps: TempMetrics
     let power: PowerMetrics?
     let hardware: HardwareInfo?
+    let os: OsInfo?
     let timestamp: String
 
     struct CpuMetrics: Codable {
@@ -57,6 +58,14 @@ struct WorkerMetrics: Codable, Identifiable {
     struct HardwareInfo: Codable {
         let cpu_model: String?
         let gpu_model: String?
+    }
+
+    /// The OS the worker is booted into. Optional because older agents
+    /// don't report it.
+    struct OsInfo: Codable {
+        let family: String  // "linux", "windows", "macos"
+        let name: String?
+        let kernel: String?
     }
 }
 
@@ -171,6 +180,26 @@ extension WorkerMetrics.GpuMetrics {
     var vramTotalFormatted: String { formatBytes(mb: vram_total_mb) }
     var vramFraction: Double {
         vram_total_mb > 0 ? Double(vram_used_mb) / Double(vram_total_mb) : 0
+    }
+}
+
+extension WorkerMetrics.OsInfo {
+    /// One-letter mark shown after the worker's alias in the menu bar.
+    var letter: String {
+        switch family {
+        case "linux": return "L"
+        case "windows": return "W"
+        case "macos": return "M"
+        default: return String(family.prefix(1)).uppercased()
+        }
+    }
+
+    /// Hover text, e.g. "Windows 11 Pro 25H2 · NT 10.0.26200".
+    var detail: String {
+        let kernelLabel = family == "windows" ? "NT" : "kernel"
+        return [name ?? family, kernel.map { "\(kernelLabel) \($0)" }]
+            .compactMap { $0 }
+            .joined(separator: " · ")
     }
 }
 

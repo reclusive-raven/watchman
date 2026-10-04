@@ -236,6 +236,18 @@ struct WorkerDetailView: View {
                 Text(displayAlias)
                     .font(.subheadline.bold())
                     .foregroundStyle(Theme.textPrimary)
+                if let os = worker.metrics?.os {
+                    Text(os.family)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(Theme.textSecondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4)
+                                .stroke(Color.white.opacity(0.12), lineWidth: 0.5)
+                        )
+                        .help(os.detail)
+                }
                 if worker.state == .unreachable {
                     Text("unreachable")
                         .font(.caption2)

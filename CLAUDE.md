@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What Is Watchman
 
 A two-part system for monitoring GPU worker machines from a macOS menu bar:
-- **Agent** (`agent/`) — Rust HTTP server on each Linux or Windows GPU worker, exposing system metrics (CPU, NVML GPU, RAM, disk, temps, CPU/GPU power, disk+network I/O) on port 8085. Stateless; advertises itself over mDNS as `_watchman._tcp.local.`.
+- **Agent** (`agent/`) — Rust HTTP server on each Linux or Windows GPU worker, exposing system metrics (CPU, NVML GPU, RAM, disk, temps, CPU/GPU power, disk+network I/O, booted OS) on port 8085. Stateless; advertises itself over mDNS as `_watchman._tcp.local.`.
 - **App** (`app/`) — SwiftUI macOS menu bar app that polls agents every second, renders live status with colored indicators, persists samples to SQLite, fires macOS notifications on threshold breaches, and exports CSV on demand.
 
 ## Build & Deploy Commands
@@ -34,6 +34,7 @@ Open `app/Watchman.xcodeproj` in Xcode and build/run. Standard macOS menu-bar ap
 ### Agent (`agent/src/`)
 
 - `main.rs` — Axum server. A background tokio task refreshes `sysinfo` every 500ms (CPU needs two samples for accurate readings). GPU metrics + GPU power go through NVML via `spawn_blocking` (NVML `Device` is not `Send`). Disk totals refresh every 10s; disk/network throughput is computed as Δbytes/Δt across the 500ms tick. State is shared via `Arc<RwLock<Metrics>>`. mDNS registration runs alongside Axum.
+- `os.rs` — `OsInfo`, the booted OS (`family` from the compile target, release `name`, `kernel`), read once at startup. On Windows the feature update ("25H2") and NT version come from the registry via `winreg`, since sysinfo only gives the product name and build.
 - `power.rs` — `RaplSampler` reads `/sys/class/powercap/intel-rapl:*/energy_uj` (**package zones only** — subzones are skipped to avoid double-counting), computes Δenergy/Δt, and handles counter wrap against `max_energy_range_uj`. Returns `None` until `deploy/99-rapl.rules` has granted group-read access.
 
 **Endpoints:** `GET /metrics` (JSON), `GET /health` (liveness).
@@ -60,7 +61,7 @@ Read paths (history views, CSV export) go through a **separate** `MetricReader` 
 - `Services/BonjourBrowser.swift` — Discovers `_watchman._tcp.` agents; user accepts into `WorkerConfig`.
 - `Services/SparklineHistory.swift` — Per-worker circular buffer sized to the menu-bar sparkline width.
 - `Services/MetricsExporter.swift` — Wraps `MetricReader.exportRawCsv` with file picker.
-- `Models/WorkerMetrics.swift` — Mirrors agent JSON (CPU/GPU/Mem/Disk/Io/Temp/Power/HardwareInfo). `WorkerEntry` derives state from thresholds.
+- `Models/WorkerMetrics.swift` — Mirrors agent JSON (CPU/GPU/Mem/Disk/Io/Temp/Power/HardwareInfo/OsInfo). `OsInfo` is optional (older agents omit it) and drives the raised L/W after each alias in the menu bar and the OS tag in the card header, whose tooltip is `OsInfo.detail`. `WorkerEntry` derives state from thresholds.
 - `Models/MetricSample.swift` — Row DTO: timestamp, hostname, cpu/gpu W, usage %, temps, VRAM, memory, disk totals, disk+net throughput.
 - `Models/AppSettings.swift` — `@MainActor` singleton backed by `UserDefaults`. Owns the mutable worker list (`WorkerConfig`), all alert thresholds, all display-color thresholds, sparkline metric choice, and `costPerKwh`.
 - `Models/AlertConfig.swift`, `Models/PowerLimits.swift` — Alert type enum, per-rule state, and threshold bundles.

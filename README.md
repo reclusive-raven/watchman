@@ -1,6 +1,6 @@
 # Watchman
 
-A macOS menu-bar monitor for a fleet of Linux and Windows GPU workers. Tiny Rust agent on each box, SwiftUI menu-bar client on the Mac. Shows live CPU, GPU, RAM, disk, temps, power draw, and I/O at a glance, fires native macOS alerts on threshold breaches, and keeps 90 days of history in SQLite for export.
+A macOS menu-bar monitor for a fleet of Linux and Windows GPU workers. Tiny Rust agent on each box, SwiftUI menu-bar client on the Mac. Shows live CPU, GPU, RAM, disk, temps, power draw, I/O and which OS each worker has booted at a glance, fires native macOS alerts on threshold breaches, and keeps 90 days of history in SQLite for export.
 
 Built for personal homelab and small-lab fleets where running Grafana feels like overkill.
 

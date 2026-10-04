@@ -125,10 +125,26 @@ struct WatchmanApp: App {
             return result
         }
 
-        // Name
+        // Name, then a raised letter for the booted OS (L, W) when the agent
+        // reports one, so a dual-boot machine's current side shows at a glance
+        let nameColor = NSColor(white: 0.75, alpha: 1)
         result.append(NSAttributedString(
-            string: "\(alias) ",
-            attributes: [.font: smallFont, .foregroundColor: NSColor(white: 0.75, alpha: 1)]
+            string: alias,
+            attributes: [.font: smallFont, .foregroundColor: nameColor]
+        ))
+        if let os = worker.metrics?.os {
+            result.append(NSAttributedString(
+                string: os.letter,
+                attributes: [
+                    .font: NSFont.systemFont(ofSize: 9, weight: .semibold),
+                    .foregroundColor: NSColor(white: 0.5, alpha: 1),
+                    .baselineOffset: 3,
+                ]
+            ))
+        }
+        result.append(NSAttributedString(
+            string: " ",
+            attributes: [.font: smallFont, .foregroundColor: nameColor]
         ))
 
         // Peak usage with gauge icon

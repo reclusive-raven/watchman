@@ -1,3 +1,4 @@
+mod os;
 mod power;
 
 use axum::{extract::State, http::StatusCode, response::Json, routing::get, Router};
@@ -23,6 +24,7 @@ struct Metrics {
     temps: TempMetrics,
     power: PowerMetrics,
     hardware: HardwareInfo,
+    os: os::OsInfo,
     timestamp: String,
 }
 
@@ -290,6 +292,7 @@ async fn main() {
 
     let hostname = get_hostname();
     info!("Starting watchman-agent on {}", hostname);
+    let os_info = os::read();
 
     // Best-effort mDNS announce for `_watchman._tcp.local.` so the macOS app's
     // Bonjour browser can auto-discover this agent. Keep the daemon alive for
@@ -317,6 +320,7 @@ async fn main() {
         temps: TempMetrics { cpu_temp_c: None },
         power: PowerMetrics::default(),
         hardware: HardwareInfo::default(),
+        os: os_info.clone(),
         timestamp: Utc::now().to_rfc3339(),
     };
 
@@ -398,6 +402,7 @@ async fn main() {
                     cpu_model: cpu_model.clone(),
                     gpu_model,
                 },
+                os: os_info.clone(),
                 timestamp: Utc::now().to_rfc3339(),
             };
 
