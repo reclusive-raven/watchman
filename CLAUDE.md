@@ -15,6 +15,7 @@ A two-part system for monitoring GPU worker machines from a macOS menu bar:
 ```bash
 make build-agent   # cargo-zigbuild → x86_64-unknown-linux-gnu
 make run-agent     # Run locally (development)
+cargo test -p watchman-agent   # runs natively on the Mac
 make deploy        # Build + deploy to all workers via SSH
 
 # One-time: grant read access to RAPL counters so cpu_w is non-null.
@@ -33,7 +34,7 @@ Open `app/Watchman.xcodeproj` in Xcode and build/run. Standard macOS menu-bar ap
 
 ### Agent (`agent/src/`)
 
-- `main.rs` — Axum server. A background tokio task refreshes `sysinfo` every 500ms (CPU needs two samples for accurate readings). GPU metrics + GPU power go through NVML via `spawn_blocking` (NVML `Device` is not `Send`). Disk totals refresh every 10s; disk/network throughput is computed as Δbytes/Δt across the 500ms tick. State is shared via `Arc<RwLock<Metrics>>`. mDNS registration runs alongside Axum.
+- `main.rs` — Axum server. `Collector` owns the sysinfo/NVML/RAPL handles and builds one `Metrics` per `sample()`: two `sysinfo` refreshes 500ms apart (CPU needs two samples for accurate readings), disk totals every ~10s, disk/network throughput as Δbytes/Δt across the tick. `spawn_collector` runs it on a dedicated OS thread (named `collector`, as is sysinfo's rayon pool it spawns) and publishes each sample through a `tokio::sync::watch` channel that the handlers read. **Never move collection onto the tokio runtime**: a sample can block for seconds (on worker-0 `getifaddrs()` waits up to 11 s on the kernel's RTNL lock), and on a tokio worker that also stalls the I/O driver, so `/metrics` stops answering. The test `metrics_answer_while_a_sample_blocks` guards this. NVML's `Device` is not `Send`, which is fine since it never leaves the collector thread. mDNS registration runs alongside Axum.
 - `os.rs` — `OsInfo`, the booted OS (`family` from the compile target, release `name`, `kernel`), read once at startup. On Windows the feature update ("25H2") and NT version come from the registry via `winreg`, since sysinfo only gives the product name and build.
 - `power.rs` — `RaplSampler` reads `/sys/class/powercap/intel-rapl:*/energy_uj` (**package zones only** — subzones are skipped to avoid double-counting), computes Δenergy/Δt, and handles counter wrap against `max_energy_range_uj`. Returns `None` until `deploy/99-rapl.rules` has granted group-read access.
 

@@ -6,9 +6,9 @@ use chrono::Utc;
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use nvml_wrapper::Nvml;
 use serde::Serialize;
-use std::sync::Arc;
+use std::time::{Duration, Instant};
 use sysinfo::{Components, Disks, Networks, System};
-use tokio::sync::RwLock;
+use tokio::sync::watch;
 use tracing::{info, warn};
 
 use crate::power::RaplSampler;
@@ -79,10 +79,6 @@ struct DiskMetrics {
 #[derive(Serialize, Clone)]
 struct TempMetrics {
     cpu_temp_c: Option<f32>,
-}
-
-struct AppState {
-    metrics: RwLock<Metrics>,
 }
 
 /// The name this agent reports: `--hostname <name>` if given, else the OS
@@ -272,9 +268,167 @@ fn read_cpu_model(sys: &System) -> Option<String> {
         .filter(|b| !b.is_empty())
 }
 
-async fn metrics_handler(State(state): State<Arc<AppState>>) -> Json<Metrics> {
-    let metrics = state.metrics.read().await;
-    Json(metrics.clone())
+/// Owns every sysinfo, NVML and RAPL handle and turns them into one
+/// `Metrics` per `sample()`. A sample blocks for at least 500 ms (CPU usage
+/// needs two refreshes) and can block far longer: it reads /proc, sysfs and
+/// netlink, and on worker-0 `getifaddrs()` has waited 2 to 11 s on the
+/// kernel's RTNL lock. So it only ever runs on the collector thread.
+struct Collector {
+    hostname: String,
+    os_info: os::OsInfo,
+    sys: System,
+    components: Components,
+    disks: Disks,
+    networks: Networks,
+    nvml: Option<Nvml>,
+    rapl: RaplSampler,
+    cpu_model: Option<String>,
+    disk_space_tick: u32,
+    disk_space: DiskMetrics,
+    last_io_instant: Instant,
+}
+
+impl Collector {
+    fn new(hostname: String, os_info: os::OsInfo) -> Self {
+        let sys = System::new_all();
+        let disks = Disks::new_with_refreshed_list();
+        let rapl = RaplSampler::new();
+        if !rapl.available() {
+            info!("RAPL not available — cpu_w will be null");
+        }
+        Collector {
+            hostname,
+            os_info,
+            cpu_model: read_cpu_model(&sys),
+            sys,
+            components: Components::new_with_refreshed_list(),
+            disk_space: collect_disk_metrics(&disks),
+            disks,
+            networks: Networks::new_with_refreshed_list(),
+            nvml: Nvml::init().ok(),
+            rapl,
+            disk_space_tick: 0,
+            last_io_instant: Instant::now(),
+        }
+    }
+
+    fn sample(&mut self) -> Metrics {
+        self.sys.refresh_all();
+        std::thread::sleep(Duration::from_millis(500));
+        self.sys.refresh_all();
+        self.components.refresh(true);
+
+        // Disk + network throughput: refresh deltas over wall-clock window.
+        self.disks.refresh(true);
+        self.networks.refresh(true);
+        let now = Instant::now();
+        let dt_secs = now.duration_since(self.last_io_instant).as_secs_f64();
+        self.last_io_instant = now;
+        let (disk_read_bps, disk_write_bps) = aggregate_disk_io(&self.disks, dt_secs);
+        let (net_rx_bps, net_tx_bps) = aggregate_net_io(&self.networks, dt_secs);
+
+        // Refresh disk space (used/total GB) every ~10s; the Disks struct is
+        // already refreshed above, so this just re-aggregates space.
+        self.disk_space_tick += 1;
+        if self.disk_space_tick >= 20 {
+            self.disk_space_tick = 0;
+            self.disk_space = collect_disk_metrics(&self.disks);
+        }
+
+        let cpu_w = self.rapl.sample();
+
+        // NVML `Device` is not Send, but it never leaves this thread.
+        let (gpu, gpu_w, gpu_model) = match &self.nvml {
+            Some(nvml) => collect_gpu_metrics(nvml),
+            None => (None, None, None),
+        };
+
+        Metrics {
+            hostname: self.hostname.clone(),
+            cpu: collect_cpu_metrics(&self.sys),
+            gpu,
+            memory: collect_memory_metrics(&self.sys),
+            disk: self.disk_space.clone(),
+            io: IoMetrics {
+                disk_read_bps,
+                disk_write_bps,
+                net_rx_bps,
+                net_tx_bps,
+            },
+            temps: collect_temp_metrics(&self.components),
+            power: PowerMetrics { cpu_w, gpu_w },
+            hardware: HardwareInfo {
+                cpu_model: self.cpu_model.clone(),
+                gpu_model,
+            },
+            os: self.os_info.clone(),
+            timestamp: Utc::now().to_rfc3339(),
+        }
+    }
+}
+
+/// What `/metrics` serves until the first sample lands.
+fn empty_metrics(hostname: String, os_info: os::OsInfo) -> Metrics {
+    Metrics {
+        hostname,
+        cpu: CpuMetrics {
+            usage_percent: 0.0,
+            core_count: 0,
+            per_core: vec![],
+        },
+        gpu: None,
+        memory: MemoryMetrics {
+            used_mb: 0,
+            total_mb: 0,
+        },
+        disk: DiskMetrics {
+            used_gb: 0,
+            total_gb: 0,
+        },
+        io: IoMetrics::default(),
+        temps: TempMetrics { cpu_temp_c: None },
+        power: PowerMetrics::default(),
+        hardware: HardwareInfo::default(),
+        os: os_info,
+        timestamp: Utc::now().to_rfc3339(),
+    }
+}
+
+/// Builds a sampler with `init` and publishes `sample()` results in a loop on
+/// a dedicated OS thread, returning the receiving end for the HTTP handlers.
+/// The thread is the point: run on a tokio worker, a blocked sample also
+/// stalled the I/O driver that worker was running, so `/metrics` went silent
+/// for as long as the sample took. Now a slow sample just leaves the last
+/// snapshot (and its `timestamp`) in place.
+fn spawn_collector<S>(
+    initial: Metrics,
+    init: impl FnOnce() -> S + Send + 'static,
+) -> watch::Receiver<Metrics>
+where
+    S: FnMut() -> Metrics,
+{
+    let (tx, rx) = watch::channel(initial);
+    std::thread::Builder::new()
+        .name("collector".into())
+        .spawn(move || {
+            let mut sample = init();
+            loop {
+                tx.send_replace(sample());
+            }
+        })
+        .expect("failed to spawn the collector thread");
+    rx
+}
+
+fn router(metrics: watch::Receiver<Metrics>) -> Router {
+    Router::new()
+        .route("/metrics", get(metrics_handler))
+        .route("/health", get(health_handler))
+        .with_state(metrics)
+}
+
+async fn metrics_handler(State(metrics): State<watch::Receiver<Metrics>>) -> Json<Metrics> {
+    Json(metrics.borrow().clone())
 }
 
 async fn health_handler() -> (StatusCode, &'static str) {
@@ -300,124 +454,63 @@ async fn main() {
     // (e.g. containerised deploys without multicast).
     let _mdns_guard = spawn_mdns_announce(&hostname, 8085);
 
-    let initial_metrics = Metrics {
-        hostname: hostname.clone(),
-        cpu: CpuMetrics {
-            usage_percent: 0.0,
-            core_count: 0,
-            per_core: vec![],
-        },
-        gpu: None,
-        memory: MemoryMetrics {
-            used_mb: 0,
-            total_mb: 0,
-        },
-        disk: DiskMetrics {
-            used_gb: 0,
-            total_gb: 0,
-        },
-        io: IoMetrics::default(),
-        temps: TempMetrics { cpu_temp_c: None },
-        power: PowerMetrics::default(),
-        hardware: HardwareInfo::default(),
-        os: os_info.clone(),
-        timestamp: Utc::now().to_rfc3339(),
-    };
-
-    let state = Arc::new(AppState {
-        metrics: RwLock::new(initial_metrics),
+    let initial = empty_metrics(hostname.clone(), os_info.clone());
+    let metrics = spawn_collector(initial, move || {
+        let mut collector = Collector::new(hostname, os_info);
+        move || collector.sample()
     });
-
-    // Background refresh task for sysinfo (CPU needs two samples ~500ms apart)
-    let bg_state = state.clone();
-    let bg_hostname = hostname.clone();
-    tokio::spawn(async move {
-        let mut sys = System::new_all();
-        let mut components = Components::new_with_refreshed_list();
-        let mut disks = Disks::new_with_refreshed_list();
-        let mut networks = Networks::new_with_refreshed_list();
-        let nvml = Nvml::init().ok();
-        let mut rapl = RaplSampler::new();
-        if !rapl.available() {
-            info!("RAPL not available — cpu_w will be null");
-        }
-        let cpu_model = read_cpu_model(&sys);
-        let mut disk_space_tick: u32 = 0;
-        let mut disk_space = collect_disk_metrics(&disks);
-        let mut last_io_instant = std::time::Instant::now();
-
-        loop {
-            sys.refresh_all();
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            sys.refresh_all();
-            components.refresh(true);
-
-            // Disk + network throughput: refresh deltas over wall-clock window.
-            disks.refresh(true);
-            networks.refresh(true);
-            let now = std::time::Instant::now();
-            let dt_secs = now.duration_since(last_io_instant).as_secs_f64();
-            last_io_instant = now;
-            let (disk_read_bps, disk_write_bps) = aggregate_disk_io(&disks, dt_secs);
-            let (net_rx_bps, net_tx_bps) = aggregate_net_io(&networks, dt_secs);
-
-            // Refresh disk space (used/total GB) every ~10s; the Disks struct is
-            // already refreshed above, so this just re-aggregates space.
-            disk_space_tick += 1;
-            if disk_space_tick >= 20 {
-                disk_space_tick = 0;
-                disk_space = collect_disk_metrics(&disks);
-            }
-
-            let cpu_w = rapl.sample();
-
-            let (gpu, gpu_w, gpu_model) = if let Some(ref nvml) = nvml {
-                // NVML Device is not Send, so use spawn_blocking
-                let nvml_ptr = nvml as *const Nvml as usize;
-                tokio::task::spawn_blocking(move || {
-                    let nvml = unsafe { &*(nvml_ptr as *const Nvml) };
-                    collect_gpu_metrics(nvml)
-                })
-                .await
-                .unwrap_or((None, None, None))
-            } else {
-                (None, None, None)
-            };
-
-            let metrics = Metrics {
-                hostname: bg_hostname.clone(),
-                cpu: collect_cpu_metrics(&sys),
-                gpu,
-                memory: collect_memory_metrics(&sys),
-                disk: disk_space.clone(),
-                io: IoMetrics {
-                    disk_read_bps,
-                    disk_write_bps,
-                    net_rx_bps,
-                    net_tx_bps,
-                },
-                temps: collect_temp_metrics(&components),
-                power: PowerMetrics { cpu_w, gpu_w },
-                hardware: HardwareInfo {
-                    cpu_model: cpu_model.clone(),
-                    gpu_model,
-                },
-                os: os_info.clone(),
-                timestamp: Utc::now().to_rfc3339(),
-            };
-
-            let mut lock = bg_state.metrics.write().await;
-            *lock = metrics;
-        }
-    });
-
-    let app = Router::new()
-        .route("/metrics", get(metrics_handler))
-        .route("/health", get(health_handler))
-        .with_state(state);
 
     let addr = "0.0.0.0:8085";
     info!("Listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, router(metrics)).await.unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    /// Blocks the way `getifaddrs()` did on worker-0 while the kernel held RTNL.
+    fn stalled_sample() -> Metrics {
+        std::thread::sleep(Duration::from_secs(3));
+        empty_metrics("test".into(), os::read())
+    }
+
+    /// `/metrics` went silent for as long as a sample blocked, because the
+    /// sampler shared the async runtime with the server. A current-thread
+    /// runtime makes that deterministic: whatever blocks it blocks the server.
+    #[test]
+    fn metrics_answer_while_a_sample_blocks() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let initial = empty_metrics("test".into(), os::read());
+                let metrics = spawn_collector(initial, || stalled_sample);
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                axum::serve(listener, router(metrics)).await.unwrap();
+            });
+        });
+
+        // Let the collector get stuck in its first sample.
+        std::thread::sleep(Duration::from_millis(200));
+        let mut stream = std::net::TcpStream::connect(addr).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        stream
+            .write_all(b"GET /metrics HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .expect("no reply within 1 s while a sample was blocked");
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    }
 }
