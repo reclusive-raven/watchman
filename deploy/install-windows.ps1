@@ -15,8 +15,12 @@ if (-not $identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrat
     exit 1
 }
 
+# Disable before stopping: the every-minute trigger below would otherwise
+# relaunch the old binary and lock it before the new one is moved in.
+# Registering the task again re-enables it.
 Write-Host "  Stopping existing agent..."
 if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+    Disable-ScheduledTask -TaskName $TaskName | Out-Null
     Stop-ScheduledTask -TaskName $TaskName
 }
 Get-Process watchman-agent -ErrorAction SilentlyContinue | Stop-Process -Force
